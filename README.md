@@ -45,14 +45,3 @@ churn-project/
 │   ├── exploration/
 │   └── modeling/
 ```
-
-## Démarrage
-
-```bash
-cp .env.example .env   # renseigner KAGGLE_USERNAME / KAGGLE_KEY
-bash setup_bucket.sh   # régénère bronze → silver → gold
-make test              # tests des transformations
-```
-
-Source : [Telco Customer Churn](https://www.kaggle.com/datasets/blastchar/telco-customer-churn)
-(amplifiée via `AMPLIFY_FACTOR` pour justifier le traitement distribué).
