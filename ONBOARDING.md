@@ -21,7 +21,7 @@ déployez et régénérez l'environnement complet **de zéro, en autonomie**.
    git clone https://github.com/<org>/churn-project.git
    cd churn-project
    cp .env.example .env        # puis renseigner KAGGLE_USERNAME / KAGGLE_KEY
-   bash bootstrap.sh           # recrée S3 + régénère bronze/silver/gold
+   bash setup_bucket.sh           # recrée S3 + régénère bronze/silver/gold
    ```
 
 ---
@@ -42,7 +42,7 @@ churn-project/
 └── logs/
 ```
 
-Création automatique et idempotente : `make buckets` (ou inclus dans `bootstrap.sh`).
+Création automatique et idempotente : `make buckets` (ou inclus dans `setup_bucket.sh`).
 
 ---
 
@@ -125,8 +125,7 @@ notebooks/                ← Jupyter · UNIQUEMENT exploration & modélisation
 ## 7. Démarrage rapide (en résumé)
 
 ```bash
-git clone https://github.com/<org>/churn-project.git && cd churn-project
+git clone https://github.com/adamdif/churn-architechture.git && cd churn-project
 cp .env.example .env          # renseigner les clés Kaggle
-bash bootstrap.sh             # tout régénérer
-make test                     # vérifier les transformations
+bash setup_bucket.sh          # tout régénérer
 ```
