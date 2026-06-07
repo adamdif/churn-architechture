@@ -44,7 +44,6 @@ churn-project/
 ├── notebooks/                     # Jupyter — exploration & modeling
 │   ├── exploration/
 │   └── modeling/
-└── tests/                         # tests unitaires des transformations
 ```
 
 ## Démarrage
