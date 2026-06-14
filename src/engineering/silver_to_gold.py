@@ -9,6 +9,12 @@ Note de gouvernance (cf. ONBOARDING.md) : en production ce sont les Data
 Scientists qui alimentent churn_features et les Data Analysts churn_kpis.
 Ce script fournit une base de référence que chaque rôle peut étendre.
 
+OPTIMISATIONS (vs version initiale) :
+    - cache() sur les features (relues pour l'écriture ET le calcul des KPIs)
+      + un seul count().
+    - Écriture UNIQUE par sortie : table Hive EXTERNE (option "path") au lieu
+      d'un write Parquet PUIS un saveAsTable managé (double stockage).
+
 Usage :
     python -m src.engineering.silver_to_gold
 """
@@ -25,7 +31,6 @@ def build_features(df: DataFrame) -> DataFrame:
     """Variables dérivées pour le modèle de churn."""
     out = df
     if "tenure" in df.columns:
-        # Ancienneté en tranches + en années.
         out = out.withColumn("tenure_years", F.round(F.col("tenure") / 12, 2))
         out = out.withColumn(
             "tenure_bucket",
@@ -40,7 +45,6 @@ def build_features(df: DataFrame) -> DataFrame:
             F.when(F.col("tenure") > 0, F.col("total_charges") / F.col("tenure"))
              .otherwise(F.col("total_charges")),
         )
-    # Nombre de services souscrits (colonnes "Yes" parmi les options).
     service_cols = [c for c in df.columns if c in (
         "online_security", "online_backup", "device_protection",
         "tech_support", "streaming_tv", "streaming_movies", "phone_service",
@@ -66,24 +70,30 @@ def build_kpis(df: DataFrame) -> DataFrame:
 def main():
     spark = config.build_spark(app_name="silver-to-gold")
 
-    df = spark.read.parquet(config.s3_path("silver"))
-    print(f"[gold] Silver lu : {df.count()} lignes")
+    silver = spark.read.parquet(config.s3_path("silver"))
 
-    features = build_features(df)
+    # cache : features relues pour l'écriture ET pour calculer les KPIs.
+    features = build_features(silver).cache()
+    n = features.count()  # matérialise le cache une seule fois
+
+    spark.sql("CREATE DATABASE IF NOT EXISTS churn_db")
+
+    # --- Features : écriture unique en table externe ---
     feat_out = config.s3_path("gold_feat")
-    features.write.mode("overwrite").parquet(feat_out)
-    print(f"[gold] Features -> {feat_out} | {len(features.columns)} colonnes")
+    (features.write.mode("overwrite").format("parquet").option("path", feat_out)
+        .saveAsTable("churn_db.gold_churn_features"))
+    print(f"[gold] Features -> {feat_out} | {n} lignes, {len(features.columns)} colonnes")
 
+    # --- KPIs : agrégat (petit) écrit en table externe ---
     kpis = build_kpis(features)
     kpi_out = config.s3_path("gold_kpi")
-    kpis.write.mode("overwrite").parquet(kpi_out)
+    (kpis.write.mode("overwrite").format("parquet").option("path", kpi_out)
+        .saveAsTable("churn_db.gold_churn_kpis"))
     print(f"[gold] KPIs -> {kpi_out}")
     kpis.show(truncate=False)
 
-    spark.sql("CREATE DATABASE IF NOT EXISTS churn_db")
-    features.write.mode("overwrite").saveAsTable("churn_db.gold_churn_features")
-    kpis.write.mode("overwrite").saveAsTable("churn_db.gold_churn_kpis")
     print("[gold] Tables Hive : churn_db.gold_churn_features, churn_db.gold_churn_kpis")
+    features.unpersist()
     spark.stop()
 
 

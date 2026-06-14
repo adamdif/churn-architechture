@@ -3,17 +3,26 @@ ETL — BRONZE -> SILVER.
 
 Nettoyage et normalisation. Aucune logique métier/feature ici (-> Gold).
 Règles appliquées :
-    - correction des types (TotalCharges textuel -> double)
-    - traitement des valeurs manquantes / vides
-    - suppression des doublons
     - standardisation des noms de colonnes (snake_case)
-    - cible Churn (Yes/No) -> booléen 0/1
+    - correction des types (total_charges textuel/vide -> double)
+    - cible churn (Yes/No) -> 0/1
+    - imputation des total_charges manquants (tenure * monthly_charges)
+    - suppression des doublons et lignes entièrement nulles
 Sortie : Parquet (colonnaire, compressé) dans silver/.
+
+OPTIMISATIONS (vs version initiale) :
+    - cache() + un seul count() : le DataFrame nettoyé est relu pour
+      l'écriture et le décompte ; sans cache, Spark relirait le CSV à chaque
+      action.
+    - Écriture UNIQUE : table Hive EXTERNE (option "path") pointant sur le
+      Parquet S3, au lieu d'un write Parquet PUIS un saveAsTable managé
+      (qui stockait la donnée DEUX fois).
 
 Usage :
     python -m src.engineering.bronze_to_silver
 """
 import sys
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -30,38 +39,37 @@ def to_snake(name: str) -> str:
     >>> to_snake("MonthlyCharges")
     'monthly_charges'
     """
-    import re
     s = name.strip().replace(" ", "_")
-    s = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", s)   # MonthlyCharges -> Monthly_Charges
-    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)  # customerID -> customer_ID
+    s = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", s)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
     return re.sub(r"_+", "_", s).lower()
 
 
 def clean(df: DataFrame) -> DataFrame:
-    # 1. Standardisation des noms de colonnes
+    # 1. Standardisation des noms de colonnes.
     for c in df.columns:
         df = df.withColumnRenamed(c, to_snake(c))
 
-    # 2. TotalCharges : vient en string avec des espaces vides -> double
+    # 2. total_charges : string avec des '' -> double (vide -> NULL).
     if "total_charges" in df.columns:
         df = df.withColumn(
             "total_charges",
-            F.when(F.trim(F.col("total_charges")) == "", None)
+            F.when(F.trim(F.col("total_charges").cast("string")) == "", None)
              .otherwise(F.col("total_charges")).cast("double"),
         )
 
-    # 3. monthly_charges / tenure en numérique sûr
+    # 3. monthly_charges / tenure en numérique sûr.
     for c in ("monthly_charges", "tenure"):
         if c in df.columns:
             df = df.withColumn(c, F.col(c).cast("double"))
 
-    # 4. Cible : Yes/No -> 1/0
+    # 4. Cible : Yes/No -> 1/0.
     if "churn" in df.columns:
         df = df.withColumn(
-            "churn", F.when(F.lower(F.col("churn")) == "yes", 1).otherwise(0)
+            "churn", F.when(F.lower(F.col("churn").cast("string")) == "yes", 1).otherwise(0)
         )
 
-    # 5. Valeurs manquantes : on impute total_charges manquant par tenure*monthly
+    # 5. Imputation : total_charges manquant ~ tenure * monthly_charges.
     if {"total_charges", "tenure", "monthly_charges"}.issubset(df.columns):
         df = df.withColumn(
             "total_charges",
@@ -70,27 +78,36 @@ def clean(df: DataFrame) -> DataFrame:
              .otherwise(F.col("total_charges")),
         )
 
-    # 6. Doublons + lignes entièrement nulles
-    df = df.dropDuplicates().na.drop("all")
-    return df
+    # 6. Doublons + lignes entièrement nulles.
+    return df.dropDuplicates().na.drop("all")
 
 
 def main():
     spark = config.build_spark(app_name="bronze-to-silver")
 
-    src = config.s3_path("bronze")
-    df = spark.read.option("header", "true").option("inferSchema", "true").csv(src)
-    print(f"[silver] Bronze lu : {df.count()} lignes")
+    raw = (
+        spark.read
+        .option("header", "true").option("inferSchema", "true")
+        .csv(config.s3_path("bronze"))
+    )
 
-    df = clean(df)
+    # cache : df relu pour le count ET l'écriture -> on évite de relire le CSV.
+    df = clean(raw).cache()
+    n = df.count()  # une seule action matérialise le cache
+
     out = config.s3_path("silver")
-    df.write.mode("overwrite").parquet(out)
-    print(f"[silver] Écrit (Parquet) -> {out} | {df.count()} lignes, {len(df.columns)} colonnes")
-
-    # Enregistrement comme table Hive pour lecture SQL par les Data Scientists.
     spark.sql("CREATE DATABASE IF NOT EXISTS churn_db")
-    df.write.mode("overwrite").saveAsTable("churn_db.silver_churn_clean")
+
+    # Écriture UNIQUE : table Hive EXTERNE pointant sur le Parquet S3.
+    # option("path", out) -> pas de double stockage (managé + parquet séparé).
+    (df.write.mode("overwrite").format("parquet").option("path", out)
+       .saveAsTable("churn_db.silver_churn_clean"))
+
+    print(f"[silver] Écrit (Parquet + table Hive externe) -> {out} "
+          f"| {n} lignes, {len(df.columns)} colonnes")
     print("[silver] Table Hive : churn_db.silver_churn_clean")
+
+    df.unpersist()
     spark.stop()
 
 
